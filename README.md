@@ -11,8 +11,12 @@ Building LLMLNCL
 * Library dependencies: pthread and isa-l
 
   If missing
+
   sudo apt-get install pthread
+
   sudo apt-get install libisal2
+
+  sudo apt-get install libisal-dev
 
 If there is no libisal2 for your Linux - download, build and instal from:
 https://github.com/intel/isa-l.git
