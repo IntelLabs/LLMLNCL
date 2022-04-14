@@ -29,6 +29,11 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#undef DEBUG_PRINT
+#ifdef LLMLNCL_DEBUG_PRINT
+#define DEBUG_PRINT 1
+#endif
+
 #define ALLOC_CHECK(Ptr, Name) if (!(Ptr)) { \
                                  printf("Error allocating memory for "); \
                                  printf((Name)); \
@@ -36,13 +41,20 @@
                                  exit(-1); \
                                }
 #define READ_CHECK(FD, Buf, Cnt) if (read((FD), (Buf), (Cnt)) != (Cnt)) { \
-                                 printf("Error reading %d bytes\n", Cnt); \
+                                 printf("Error reading %d bytes\n", \
+                                        (int32_t)Cnt); \
                                  exit(-1); \
                                }
 #define WRITE_CHECK(FD, Buf, Cnt) if (write((FD), (Buf), (Cnt)) != (Cnt)) { \
-                                 printf("Error writing %d bytes\n", Cnt); \
+                                 printf("Error writing %d bytes\n", \
+                                        (int32_t)Cnt); \
                                  exit(-1); \
                                }
+
+#define PIPE_CHECK(Pp) if (pipe(Pp) != 0) { \
+                         printf("Error opening pipe\n"); \
+                         exit(-1); \
+                       }
 
 MultiLink::MultiLink() {
   TotalLinkNumber = 0;
@@ -84,6 +96,9 @@ void MultiLink::setCommDeviceNumber(uint16_t NumLocal, uint16_t NumRemote) {
   ThreadRxSocket =
       (pthread_t *)malloc(sizeof(pthread_t) * LocalCommDeviceNumber);
   ALLOC_CHECK(ThreadRxSocket, "socket threads");
+  for (int32_t i = 0; i < LocalCommDeviceNumber; i++) {
+    ThreadRxSocket[i] = 0;
+  }
   UdpBuffer = (char **)malloc(sizeof(char *) * LocalCommDeviceNumber);
   ALLOC_CHECK(UdpBuffer, "udp buffer");
   for (int32_t i = 0; i < LocalCommDeviceNumber; i++) {
@@ -119,7 +134,7 @@ void MultiLink::setCommDeviceNumber(uint16_t NumLocal, uint16_t NumRemote) {
   pthread_mutex_init(&SendMtx, NULL);
   pthread_mutex_init(&ReceiveMtx, NULL);
 
-  pipe(SendSequencePipe);
+  PIPE_CHECK(SendSequencePipe);
   fcntl(SendSequencePipe[0], F_SETPIPE_SZ, 1024 * 256);
   SendSequencePipeSize = fcntl(SendSequencePipe[0], F_GETPIPE_SZ);
   SendSequenceDataBuffer = (uint8_t *)malloc(256 * PacketSizeMax + 6);
@@ -129,7 +144,7 @@ void MultiLink::setCommDeviceNumber(uint16_t NumLocal, uint16_t NumRemote) {
   pthread_create(&ThreadRedundant, NULL, helperRedundant,
                  this); // redundant packet generaton thread
 
-  pipe(SendPacketPipe);
+  PIPE_CHECK(SendPacketPipe);
   fcntl(SendPacketPipe[0], F_SETPIPE_SZ, 1024 * 256);
   SendPacketPipeSize = fcntl(SendPacketPipe[0], F_GETPIPE_SZ);
   SendRedundantSequenceDataBuffer =
@@ -143,11 +158,11 @@ void MultiLink::setCommDeviceNumber(uint16_t NumLocal, uint16_t NumRemote) {
   pthread_create(&ThreadScheduler, NULL, helperScheduler,
                  this); // UDP packet sender thread
 
-  pipe(ReceivePacketPipe); // to send data from socket receiver to sequence
-                             // decoder
+  PIPE_CHECK(ReceivePacketPipe);
+  // to send data from socket receiver to sequence decoder
   fcntl(ReceivePacketPipe[0], F_SETPIPE_SZ, 1024 * 256);
-  pipe(ReceiveSequencePipe); // to send data from sequence decoder to the
-                               // final recepient
+  PIPE_CHECK(ReceiveSequencePipe);
+  // to send data from sequence decoder to the final recepient
   fcntl(ReceiveSequencePipe[0], F_SETPIPE_SZ, 1024 * 256);
   ReceiveSequencePipeSize = fcntl(ReceiveSequencePipe[0], F_GETPIPE_SZ);
   ReceivePacketDataBuffer = (uint8_t *)malloc(PacketSizeMax);
@@ -167,10 +182,14 @@ MultiLink::~MultiLink() {
 
   if (TotalLinkNumber > 0) { // only if there was initialization before
 
-    // stop handshake thread
-    pthread_cancel(ThreadHandshake);
-    pthread_join(ThreadHandshake, &SomePtr);
-
+    // stop handshake thread if there was an active link
+    for (int32_t i = 0; i < TotalLinkNumber; i++) {
+      if (Link[i].Status > 0)  {
+        pthread_cancel(ThreadHandshake);
+        pthread_join(ThreadHandshake, &SomePtr);
+        break;
+      }
+    }
     // stop redundant packet generation thread and free memories
     pthread_cancel(ThreadRedundant);
     pthread_join(ThreadRedundant, &SomePtr);
@@ -197,8 +216,10 @@ MultiLink::~MultiLink() {
 
     // stop receivers amd free receive buffers
     for (int32_t i = 0; i < LocalCommDeviceNumber; i++) {
-      pthread_cancel(ThreadRxSocket[i]);
-      pthread_join(ThreadRxSocket[i], &SomePtr);
+      if (ThreadRxSocket[i]) {
+        pthread_cancel(ThreadRxSocket[i]);
+        pthread_join(ThreadRxSocket[i], &SomePtr);
+      }
       free(UdpBuffer[i]);
     }
 
@@ -235,11 +256,11 @@ void MultiLink::setRemoteAddrAndPort(uint16_t Num, char *SzIPaddr,
     Link[ILocal * RemoteCommDeviceNumber + Num].Remote.sin_port =
         htons(Port);
   }
-  TopRemoteLink++;
 }
 
 void MultiLink::addRemoteAddrAndPort(char *SzIPaddr, uint16_t Port) {
   setRemoteAddrAndPort(TopRemoteLink, SzIPaddr, Port);
+  TopRemoteLink++;
   if (TopRemoteLink > RemoteCommDeviceNumber) {
     printf("Operation exceed number of allowed remote Links (%u)\n",
            RemoteCommDeviceNumber);
@@ -256,6 +277,10 @@ void MultiLink::setLocalIfaceAndPort(uint16_t ILocal, char *Name,
   SocketFd = socket(AF_INET, SOCK_DGRAM, 0);
   if (SocketFd < 0) {
     printf("error creating local socket at iface #%u\n", ILocal);
+    exit(-1);
+  }
+  if (RemoteCommDeviceNumber <= 0) {
+    printf("error, numbur of remote device can't be 0 or less\n");
     exit(-1);
   }
   for (IRemote = 0; IRemote < RemoteCommDeviceNumber; IRemote++) {
@@ -282,11 +307,11 @@ void MultiLink::setLocalIfaceAndPort(uint16_t ILocal, char *Name,
   Ht1->Ml = this;
   Ht1->Num = ILocal;
   pthread_create(&(ThreadRxSocket[ILocal]), NULL, helperSockets, Ht1);
-  TopLocalLink++;
 }
 
 void MultiLink::addLocalIfaceAndPort(char *Name, uint16_t Port) {
   setLocalIfaceAndPort(TopLocalLink, Name, Port);
+  TopLocalLink++;
   if (TopLocalLink > LocalCommDeviceNumber) {
     printf("Operation exceed number of allowed remote Links (%u)\n",
            LocalCommDeviceNumber);
@@ -299,7 +324,6 @@ void MultiLink::runSockets(uint16_t LocalSocketIdx) {
   struct sockaddr_in SenderAddr;
   socklen_t AddrLen;
   size_t MsgLen;
-  struct HelperT *Ht2;
 
   while (1) {
     // receive a packet
@@ -309,7 +333,7 @@ void MultiLink::runSockets(uint16_t LocalSocketIdx) {
         UdpBuffer[LocalSocketIdx], MaxUdpBufferSize, MSG_WAITALL,
         (struct sockaddr *)&SenderAddr, &AddrLen);
     RemoteIdx = findRemoteIndexByAddr(LocalSocketIdx, SenderAddr);
-    if (RemoteIdx < TotalLinkNumber)
+    if (LocalSocketIdx * RemoteCommDeviceNumber + RemoteIdx < TotalLinkNumber)
       Link[LocalSocketIdx * RemoteCommDeviceNumber + RemoteIdx]
           .RxTotalBytes += MsgLen;
 
@@ -343,11 +367,14 @@ void MultiLink::runSockets(uint16_t LocalSocketIdx) {
                 .Remote.sin_addr.s_addr = SenderAddr.sin_addr.s_addr;
             Link[LocalSocketIdx * RemoteCommDeviceNumber + i]
                 .Remote.sin_port = SenderAddr.sin_port;
-            Link[LocalSocketIdx * RemoteCommDeviceNumber + i].Status =
-                2; // handshake in progress 2
             Link[LocalSocketIdx * RemoteCommDeviceNumber + i]
-                .RemoteLinkIdx = ui16value; // the value that the other party
-                                            // sent is the link idx
+                .Remote.sin_family = AF_INET;
+            Link[LocalSocketIdx * RemoteCommDeviceNumber + i].Status = 2;
+            // handshake in progress 2
+            Link[LocalSocketIdx * RemoteCommDeviceNumber + i].RemoteLinkIdx
+                = ui16value;
+            // the value that the other party
+            // sent is the link idx
           } else {
             // no free slots, error?
             break;
@@ -390,6 +417,7 @@ void MultiLink::runSockets(uint16_t LocalSocketIdx) {
         if (RemoteIdx < RemoteCommDeviceNumber) {
           if (Link[LocalSocketIdx * RemoteCommDeviceNumber + RemoteIdx]
                   .Status == 2) {
+            struct HelperT *Ht2;
             // handshake started and processed correctly. Complete it now
             ui16value = 0xFFFF;
             sendto(Link[LocalSocketIdx * RemoteCommDeviceNumber +
@@ -422,14 +450,13 @@ void MultiLink::runSockets(uint16_t LocalSocketIdx) {
       break;
 
     case 4: // rate control message
-      RemoteIdx = *(
-          (uint16_t *)&UdpBuffer[LocalSocketIdx]
-                                 [0]); // this is the link id as remote sees it
-      ui16value = *((uint16_t *)&UdpBuffer[LocalSocketIdx]
-                                           [2]); // this is the rate in Kb/s
-      if (RemoteIdx < TotalLinkNumber) {
-        for (i = 0; i < TotalLinkNumber;
-             i++) { // we need to find a link with remote index ID == i
+      RemoteIdx = *((uint16_t *)&UdpBuffer[LocalSocketIdx][0]);
+      // this is the link id as remote sees it
+      ui16value = *((uint16_t *)&UdpBuffer[LocalSocketIdx][2]);
+      // this is the rate in Kb/s
+      if (RemoteIdx < RemoteCommDeviceNumber) {
+        for (i = 0; i < TotalLinkNumber; i++) {
+          // we need to find a link with remote index ID == i
           if (Link[i].RemoteLinkIdx == RemoteIdx) { // found it!
             Link[i].RxReportedRate = ui16value;
             Link[i].LastMeasurementsReceivedTime = getLocalTime();
@@ -578,16 +605,28 @@ void MultiLink::runMeasurements(uint16_t LinkIdx) {
 
     if (Link[LinkIdx].ProbationModeCounter > 0) {
       // In Probation mode
-      if (Link[LinkIdx].ProbationModeCounter ==
-          8) { // first time run only. Reset counters
+      if (Link[LinkIdx].RxRateStatistics[0] < MinLinkTXRate) {
+          Link[LinkIdx].ProbationModeCounter = 0;
+#ifdef DEBUG_PRINT
+          printf("Probation is skipped%d\n");
+#endif
+          continue;
+      }
+      // first time run only. Reset counters
+      if (Link[LinkIdx].ProbationModeCounter == 8) {
         RateDecreaseObserved = false;
         RateIncreaseObserved = false;
       }
-      if (Link[LinkIdx].ProbationModeCounter ==
-          5) { // one half of probation time reached. Change TX rate.
+      // one half of probation time reached. Change TX rate.
+      if (Link[LinkIdx].ProbationModeCounter == 5) {
         Link[LinkIdx].TxDesiredRate -=
             2 * (Link[LinkIdx].TxDesiredRate -
-                 Link[LinkIdx].TxRateBeforeProbation);
+                Link[LinkIdx].TxRateBeforeProbation);
+        if (Link[LinkIdx].TxDesiredRate < MinLinkTXRate) {
+            Link[LinkIdx].TxDesiredRate = MinLinkTXRate;
+        } else if (Link[LinkIdx].TxDesiredRate > MaxLinkTXRate) {
+            Link[LinkIdx].TxDesiredRate = MaxLinkTXRate;
+        }
       }
 
       // update probation flags
@@ -603,6 +642,13 @@ void MultiLink::runMeasurements(uint16_t LinkIdx) {
         // 4 last numbers are REALLY greater than 4 numbers before
         RateIncreaseObserved = true;
         SomeRateObserved = (uint64_t)(AverageOver4Last * 1024.0);
+        if (SomeRateObserved < MinLinkTXRate) {
+            SomeRateObserved = MinLinkTXRate;
+        }
+        else if (SomeRateObserved > MaxLinkTXRate) {
+            SomeRateObserved = MaxLinkTXRate;
+        }
+
       }
       if ((Link[LinkIdx].RxRateStatistics[1] +
            Link[LinkIdx].RxRateStatistics[2]) /
@@ -642,12 +688,14 @@ void MultiLink::runMeasurements(uint16_t LinkIdx) {
       Link[LinkIdx].ProbationModeCounter--;
     } else { // Not in Probation mode
 
-      if (Link[LinkIdx].TxRateStatistics[0] < (MinLinkTXRate > 1))
-        continue; // we sent nothing
+      if ((Link[LinkIdx].TxRateStatistics[0] < (MinLinkTXRate / 1024)) ||
+          (Link[LinkIdx].TxRateStatistics[1] < (MinLinkTXRate / 1024)) ||
+          (Link[LinkIdx].TxRateStatistics[2] < (MinLinkTXRate / 1024)))
+         continue; // we sent nothing
+      // data is sending, but no replies from the rx in 3 intervals
       if (Link[LinkIdx].RxRateStatistics[0] +
               Link[LinkIdx].RxRateStatistics[1] +
-              Link[LinkIdx].RxRateStatistics[2] ==
-          0) { // data is sending, but no replies from the rx in 3 intervals
+              Link[LinkIdx].RxRateStatistics[2] == 0) {
         Link[LinkIdx].TxDesiredRate = MinLinkTXRate; // set to 100 KBps;
         Link[LinkIdx].LastRateControlActionTime = CurrentTime;
 #ifdef DEBUG_PRINT
@@ -685,8 +733,9 @@ void MultiLink::runMeasurements(uint16_t LinkIdx) {
         continue;
       }
 
+      // no changes during last 15 measurements
       if ((Link[LinkIdx].LastRateControlActionTime + MeasureInterval * 15) <
-          CurrentTime) { // no changes during last 15 measurements
+          CurrentTime) {
         // check if other links are in probation
         for (i = 0; i < TotalLinkNumber; i++)
           if (Link[i].ProbationModeCounter > 0)
@@ -698,6 +747,12 @@ void MultiLink::runMeasurements(uint16_t LinkIdx) {
               Link[LinkIdx].TxDesiredRate;
           Link[LinkIdx].TxDesiredRate =
               (uint64_t)(1.2 * Link[LinkIdx].TxDesiredRate);
+          if (Link[LinkIdx].TxDesiredRate < MinLinkTXRate) {
+              Link[LinkIdx].TxDesiredRate = MinLinkTXRate;
+         } else if (Link[LinkIdx].TxDesiredRate > MaxLinkTXRate) {
+             Link[LinkIdx].TxDesiredRate = MaxLinkTXRate;
+         }
+
 #ifdef DEBUG_PRINT
           printf("link %u, probation starts to %lu\n", LinkIdx,
                  Link[LinkIdx].TxDesiredRate);
@@ -1064,11 +1119,11 @@ void MultiLink::runDecoder() {
       CorrectSequences++;
         // correct reconstruction: write sequence to the output buffer
         ioctl(ReceiveSequencePipe[0], FIONREAD, &NBytes);
-        if ((ReceiveSequencePipeSize >> 1) >
-            NBytes) { // check for enough space in the pipe. A workaround: stop
-                      // if 1/2 of the pipe size is reached (becasure it is not
-                      // possible to know the real free space as pipes store
-                      // recorts in pages of 4096 blocks)
+        if ((ReceiveSequencePipeSize >> 1) > NBytes) {
+          // check for enough space in the pipe. A workaround: stop
+          // if 1/2 of the pipe size is reached (becasure it is not
+          // possible to know the real free space as pipes store
+          // recorts in pages of 4096 blocks)
           WRITE_CHECK(ReceiveSequencePipe[1], &SeqSize, 2);
           WRITE_CHECK(ReceiveSequencePipe[1], &DecodedSequenceBuffer[6], SeqSize);
         } else
@@ -1083,7 +1138,10 @@ void MultiLink::runDecoder() {
       // clear forbidden flags and reset data all sequences that have ids later
       // than this one by 1/2 of the buffer
       for (i = MaxSendSequenceId / 4; i < 3 * MaxSendSequenceId / 4; i++) {
-        k = (SequenceId + i) % MaxSendSequenceId;
+        k = (SequenceId + i);
+        if (k >= MaxSendSequenceId)
+          k -= MaxSendSequenceId;
+//        k = (SequenceId + i) % MaxSendSequenceId;
         DecoderSequences[k].Forbidden = false;
         if (DecoderSequences[k].AvailableBlockNumber > 0) {
           DecoderSequences[k].AvailableBlockNumber = 0;
@@ -1156,6 +1214,7 @@ void MultiLink::setRedundancy(uint8_t K, uint8_t N) {
 
 uint64_t MultiLink::getLocalTime() {
   // may need to replace it with a better way to get time, but for now...
+  struct timeval t0;
   gettimeofday(&t0, NULL);
   return t0.tv_sec * 1000000 + t0.tv_usec;
 }

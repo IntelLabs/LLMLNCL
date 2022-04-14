@@ -172,7 +172,6 @@ private:
   uint16_t TotalLinkNumber; // =multipe of LocalCommDeviceNumber and
                             // RemoteCommDeviceNumber, should be less than
                             // 0xFFFF as 0xFFFF is used in the handshake
-  struct timeval t0;
   pthread_t *ThreadRxSocket; // each socket reader is a separate thread
   pthread_t ThreadHandshake, ThreadRedundant, ThreadScheduler,
       ThreadDecoder;
@@ -250,7 +249,7 @@ private:
     HtPtr = (struct HelperT *)Arg;
     MultiLink *ML = reinterpret_cast<MultiLink *>(HtPtr->Ml);
     Value = HtPtr->Num;
-    // free(htPtr);
+    free(HtPtr);
     ML->runMeasurements(Value);
     return 0;
   }
