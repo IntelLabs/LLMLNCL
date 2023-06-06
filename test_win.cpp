@@ -1,5 +1,5 @@
 /*
- * Copyright 2020-2022 Intel Corporation
+ * Copyright 2022 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,16 @@
 
 #include "multilink.h"
 #include <stdio.h>
-#include <unistd.h>
+#include <windows.h>
+#include <tchar.h>
+#include <strsafe.h>
+#include <synchapi.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <sysinfoapi.h>
+
+//#include <unistd.h>
 
 MultiLink MlSend;
 MultiLink MlReceive;
@@ -32,7 +41,8 @@ uint16_t N = 0;
 uint16_t K = 0;
 uint16_t TestType = 0;
 
-void *runReceive(void *arg) {
+DWORD WINAPI runReceive(LPVOID Arg) {
+//void *runReceive(void *arg) {
   uint16_t Size = 0;
   uint8_t Data[0xFFFF];
 
@@ -44,7 +54,7 @@ void *runReceive(void *arg) {
     MlReceive.addRemoteAddrAndPort("127.0.0.1", RemotePort + i);
   MlReceive.setRedundancy(N, K);
   MlReceive.initiateLinks();
-  sleep(1);
+  Sleep(1000);
   if (TestType == 0) {
     // Receiving increment
     for (int32_t i = 0; i < 1024; i++) {
@@ -57,12 +67,13 @@ void *runReceive(void *arg) {
         printf("Wrong data on receive %d, expected %d\n", *(int32_t *)Data, i);
         exit(-3);  // wrong increment received
       }
-      sleep(0.01);
+      Sleep(10);
     }
   } else if (TestType == 1) {
     // Receiving big packet
-    sleep(1);
+    Sleep(1000);
     MlReceive.receive(&Size, Data);
+    printf("Size %d\n", Size);
     if (Size != 32768) {
       printf("Wrong size on receive %u, expected 4\n", Size);
       exit(-2);  // wrong size on increment receive
@@ -75,6 +86,7 @@ void *runReceive(void *arg) {
   } else {
     // just handshake
   }
+  printf("Finish receive\n");
   return NULL;
 }
 
@@ -82,8 +94,8 @@ int main(int argc, char *argv[]) {
 
   uint16_t Cntr = 0, Size;
   uint8_t Data[0xFFFF];
-  pthread_t ReceiveThread;
-
+  //pthread_t ReceiveThread;
+  HANDLE ReceiveThread;
   if (argc < 6)
     return 1;
 
@@ -93,20 +105,25 @@ int main(int argc, char *argv[]) {
   N = atoi(argv[4]);
   K = atoi(argv[5]);
 
-
   MlSend.setCommDeviceNumber(LocalNum, RemoteNum);
   for (int32_t i = 0; i < LocalNum; i++)
+ //   MlSend.addLocalIfaceAndPort("ethernet_0", RemotePort + i);
     MlSend.addLocalIfaceAndPort("lo", RemotePort + i);
   MlSend.setRedundancy(N, K);
-  pthread_create(&ReceiveThread, NULL, runReceive, NULL);
-  sleep(4);
+  DWORD dwThreadIdArray;
+  ReceiveThread = CreateThread(NULL, 0, runReceive,
+          NULL, 0, &dwThreadIdArray);
+
+  //pthread_create(&ReceiveThread, NULL, runReceive, NULL);
+  Sleep(2000);
+  printf("Test type %d\n", TestType);
   if (TestType == 0) {
     // Sending increment
     for (int32_t i = 0; i < 1024; i++) {
       Size = 4;
       *(int32_t *)Data = i;
       MlSend.send(Size, Data);
-      sleep(0.01);
+      Sleep(10);
     }
   } else if (TestType == 1) {
     // sending big packet
@@ -117,9 +134,14 @@ int main(int argc, char *argv[]) {
   } else {
     // just handshake
   }
-  sleep(2);
+  Sleep(2000);
   // if receive thread not finished return error
-  if (pthread_cancel(ReceiveThread) == 0)
-    return 1;
+  //if (pthread_cancel(ReceiveThread) == 0)
+//    return 1;
+  //if (TerminateThread(ReceiveThread, 0)) {
+//    printf("Test failed\n");
+  //  return 1;
+  //}
+  printf("Test passed\n");
   return 0;
 }

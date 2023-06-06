@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Intel Corporation
+ * Copyright 2020-2022 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,18 +21,27 @@
 #ifndef MULTILINK_H
 #define MULTILINK_H
 
+#ifdef _WIN32
+#include "Ws2tcpip.h"
+#include "winsock.h"
+#include <Namedpipeapi.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+#else
 #include <netinet/in.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/time.h>
-
+#endif
 class MultiLink {
 
 public:
   MultiLink();
   ~MultiLink();
-
+  MultiLink(MultiLink &Ml);
+  MultiLink &operator=(const MultiLink &Ml);
   /**
    * This function needs to be called first.
    * It sets up parameters, allocates memory and starts threads.
@@ -122,7 +131,10 @@ public:
 private:
   uint16_t TopLocalLink; // Number of the latest link set up
   uint16_t TopRemoteLink; // Number of the latest link set up
-
+#ifdef _WIN32
+  WSADATA wsaData;
+#endif
+  int32_t ReceiveSequencePipeCurSize;
   // reference only. Never used
   struct SequenceT {
     uint16_t PayloadSize;
@@ -134,7 +146,7 @@ private:
   struct PaketT {
     uint16_t SequenceId;
     uint8_t PacketIdx; // current packet index, max = 255 here, but CRS lets to
-                        // have 256
+                       // have 256
     uint8_t OriginalPacketNumber;
     uint8_t RecoveryPacketNumber;
     uint8_t *Data;
@@ -145,12 +157,11 @@ private:
     uint16_t Status; // 0 = link down, 1 = handshake initiated, 2 = handshare in
                      // progress, 3 = link is up
     double RxMeasuredRate, TxMeasuredRate;
-    uint16_t
-        RxReportedRate; // rate as reported by the receiver. Rate is in KBps
-    float RxRateStatistics[10],
-        TxRateStatistics[10]; // [0] = newest, [1] = previous, [9] = oldest.
-                                // Rates are in Kbps
-    uint64_t TxDesiredRate;   // target rate
+    // rate as reported by the receiver. Rate is in KBps
+    uint16_t RxReportedRate;
+    // [0] = newest, [1] = previous, [9] = oldest. Rates are in Kbps
+    float RxRateStatistics[10], TxRateStatistics[10];
+    uint64_t TxDesiredRate; // target rate
     uint64_t TxRateBeforeProbation;
     uint64_t LastRateControlActionTime;    // last time rate change requested
     uint64_t LastMeasurementsReceivedTime; // last time we received a packet
@@ -161,9 +172,13 @@ private:
                                 // link will be done sending its packets
                                 // according to the rate
     struct sockaddr_in Remote;  // where to send to
-    int SocketFd;              // local socket descriptor
+    int SocketFd;               // local socket descriptor
     uint16_t RemoteLinkIdx;     // index of this link as the other side sees it
+#ifdef _WIN32
+    HANDLE ThreadMeasurements;
+#else
     pthread_t ThreadMeasurements;
+#endif
     uint8_t ProbationModeCounter;
   } * Link;
 
@@ -172,14 +187,21 @@ private:
   uint16_t TotalLinkNumber; // =multipe of LocalCommDeviceNumber and
                             // RemoteCommDeviceNumber, should be less than
                             // 0xFFFF as 0xFFFF is used in the handshake
+
+#ifdef _WIN32
+  HANDLE* ThreadRxSocket; // each socket reader is a separate thread
+  HANDLE ThreadHandshake, ThreadRedundant, ThreadScheduler,
+      ThreadDecoder;
+#else
   pthread_t *ThreadRxSocket; // each socket reader is a separate thread
   pthread_t ThreadHandshake, ThreadRedundant, ThreadScheduler,
       ThreadDecoder;
+#endif
   size_t MaxUdpBufferSize = 3000;
   char **UdpBuffer;
   uint64_t MeasureInterval = 100000; // 100 miliseconds
-  uint64_t MinLinkTXRate = 102400;    // 100KBps
-  uint64_t MaxLinkTXRate = 10240000;  // 10000KBps
+  uint64_t MinLinkTXRate = 102400;   // 100KBps
+  uint64_t MaxLinkTXRate = 10240000; // 10000KBps
   uint16_t CrsRateNumerator, CrsRateDenominator;
 
   uint8_t *EncoderBlocks[256];
@@ -200,12 +222,22 @@ private:
   uint16_t PacketSizeMax = 1500;
   uint8_t *SendPacketDataBuffer, *SendRedundantPacketDataBuffer,
       *SendPacketSchedulerBuffer, *ReceivePacketDataBuffer;
+#ifdef _WIN32
+  HANDLE SendSequencePipe[2], SendPacketPipe[2], ReceivePacketPipe[2],
+      ReceiveSequencePipe[2]; // pipes to exchange data between threads
+#else
   int SendSequencePipe[2], SendPacketPipe[2], ReceivePacketPipe[2],
       ReceiveSequencePipe[2]; // pipes to exchange data between threads
+#endif
   int SendSequencePipeSize, SendPacketPipeSize,
       ReceiveSequencePipeSize;
+#ifdef _WIN32
+  HANDLE SendPacketWriterMtx, ReceivePacketWriterMtx, SendMtx,
+      ReceiveMtx;
+#else
   pthread_mutex_t SendPacketWriterMtx, ReceivePacketWriterMtx, SendMtx,
       ReceiveMtx;
+#endif
   uint64_t CorrectSequences, CorrectSequencesDropped,
       IncorrectSequences; // statistics only. Can be removed.
 
@@ -231,7 +263,11 @@ private:
     uint16_t Num;
   } * HelperStruct;
 
+#ifdef _WIN32
+  static DWORD WINAPI helperSockets(LPVOID Arg) {
+#else
   static void *helperSockets(void *Arg) {
+#endif
     uint16_t Value;
     struct HelperT *HtPtr;
     HtPtr = (struct HelperT *)Arg;
@@ -243,7 +279,11 @@ private:
   }
   void runSockets(uint16_t SocketIdx);
 
+#ifdef _WIN32
+  static DWORD WINAPI helperMeasurements(LPVOID Arg) {
+#else
   static void *helperMeasurements(void *Arg) {
+#endif
     uint16_t Value;
     struct HelperT *HtPtr;
     HtPtr = (struct HelperT *)Arg;
@@ -254,29 +294,44 @@ private:
     return 0;
   }
   void runMeasurements(uint16_t LinkIdx);
-
+#ifdef _WIN32
+  static DWORD WINAPI helperHandshake(LPVOID Arg) {
+#else
   static void *helperHandshake(void *Arg) {
+#endif
     MultiLink *ML = reinterpret_cast<MultiLink *>(Arg);
     ML->runHandshake();
     return 0;
   }
   void runHandshake();
 
+#ifdef _WIN32
+  static DWORD WINAPI helperRedundant(LPVOID Arg) {
+#else
   static void *helperRedundant(void *Arg) {
+#endif
     MultiLink *ML = reinterpret_cast<MultiLink *>(Arg);
     ML->runMakeRedundantPackets();
     return 0;
   }
   void runMakeRedundantPackets();
 
+#ifdef _WIN32
+  static DWORD WINAPI helperScheduler(LPVOID Arg) {
+#else
   static void *helperScheduler(void *Arg) {
+#endif
     MultiLink *ML = reinterpret_cast<MultiLink *>(Arg);
     ML->runScheduleAndSendPacket();
     return 0;
   }
   void runScheduleAndSendPacket();
 
+#ifdef _WIN32
+  static DWORD WINAPI helperDecoder(LPVOID Arg) {
+#else
   static void *helperDecoder(void *Arg) {
+#endif
     MultiLink *ML = reinterpret_cast<MultiLink *>(Arg);
     ML->runDecoder();
     return 0;
